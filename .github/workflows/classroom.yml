@@ -93,8 +93,13 @@ jobs:
           sed -i "s#http://localhost:8080#http://$IP#" $VARIANT/postman/environment.json
 
       - name: Install newman
-        run: npm install -g newman
+        run: |
+          npm install -g newman
 
-      - uses: education/autograding@v1
-        id: autograder
-        continue-on-error: true
+      - name: Run API Tests
+        timeout-minutes: 5
+        run: ./scripts/test-script.sh
+        env:
+          VARIANT: v1
+          DEPLOYMENT_NAME: bonus-service
+          NAMESPACE: test
