@@ -3,9 +3,16 @@ on:
   push:
     branches:
       - master
+      - main
   pull_request:
     branches:
       - master
+      - main
+env:
+  VARIANT: v1
+  NAMESPACE: test
+  DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  TAG: ${{ github.sha }}
 jobs:
   build:
     name: Autograding
@@ -35,14 +42,53 @@ jobs:
       - name: Unit tests gateway-service
         run: cd gateway-service && chmod +x gradlew && ./gradlew test --no-daemon
 
-      - name: Build images
-        timeout-minutes: 10
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push images
+        timeout-minutes: 15
         run: docker compose build --push
 
-      # TODO deploy to k8s with liveness and readyness probes
+      - name: Set up kubectl and helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl get nodes
+
+      - name: Deploy postgres
+        run: |
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          helm upgrade --install postgres charts/postgres -n $NAMESPACE --wait --timeout 3m
+
+      - name: Deploy services
+        run: |
+          for svc in flight-service ticket-service bonus-service gateway-service; do
+            helm upgrade --install $svc charts/service -n $NAMESPACE \
+              -f k8s/$svc.yaml \
+              --set image.repository=$DOCKER_USER/$svc \
+              --set image.tag=$TAG \
+              --wait --timeout 5m
+          done
 
       - name: Wait before services are ready
-        run: kubectl wait -n test -l app.kubernetes.io/name=gateway pod --for=condition=Ready --timeout 3m
-      
-      # TODO setup parameters in classroom/autograding.json
-      
+        run: kubectl wait -n $NAMESPACE -l app.kubernetes.io/name=gateway pod --for=condition=Ready --timeout 3m
+
+      - name: Set baseUrl to ingress address
+        run: |
+          IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Ingress: $IP"
+          sed -i "s#http://localhost:8080#http://$IP#" $VARIANT/postman/environment.json
+
+      - name: Install newman
+        run: npm install -g newman
+
+      - uses: education/autograding@v1
+        id: autograder
+        continue-on-error: true
